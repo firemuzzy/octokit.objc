@@ -316,6 +316,28 @@ typedef enum : NSUInteger {
 // signal will never complete.
 + (RACSignal *)signInToServerUsingWebBrowser:(OCTServer *)server scopes:(OCTClientAuthorizationScopes)scopes;
 
+// Prompts the user to sign in on the provided web view
+//
+// Your app must be the preferred application for handling its URL callback, as set
+// in your OAuth Application Settings). When the callback URL is opened using
+// your app, you must invoke +completeSignInWithCallbackURL: in order for this
+// authentication method to complete successfully.
+//
+// **NOTE:** You must invoke +setClientID:clientSecret: before using this
+// method.
+//
+// webView - The web view used to show the login screen
+//
+// server - The server that the user should sign in to. This must not be
+//          nil.
+// scopes - The scopes to request access to. These values can be
+//          bitwise OR'd together to request multiple scopes.
+//
+// Returns a signal which will send an OCTClient then complete on success, or
+// else error. If +completeSignInWithCallbackURL: is never invoked, the returned
+// signal will never complete.
++ (RACSignal *)signInToServerUsingWebView:(UIWebView *)webView server:(OCTServer *)server scopes:(OCTClientAuthorizationScopes)scopes;
+
 // Makes a request to the given GitHub server to determine its metadata.
 //
 // server - The server to retrieve metadata for. This must not be nil.

@@ -480,6 +480,121 @@ static NSString *OCTClientOAuthClientSecret = nil;
 	}] setNameWithFormat:@"+authorizeWithServerUsingWebBrowser: %@ scopes:", server];
 }
 
++ (RACSignal *)signInToServerUsingWebView:(UIWebView *)webView server:(OCTServer *)server scopes:(OCTClientAuthorizationScopes)scopes {
+	NSParameterAssert(server != nil);
+    
+	NSString *clientID = self.class.clientID;
+	NSString *clientSecret = self.class.clientSecret;
+	NSAssert(clientID != nil && clientSecret != nil, @"+setClientID:clientSecret: must be invoked before calling %@", NSStringFromSelector(_cmd));
+    
+	OCTClient *client = [[self alloc] initWithServer:server];
+    
+	return [[[[[[[[[self
+                    authorizeWithServerUsingWebView:webView server:server scopes:scopes]
+                   combineLatestWith:[RACSignal return:server]]
+                  catch:^(NSError *error) {
+                      if (error.code == OCTClientErrorUnsupportedServerScheme) {
+                          OCTServer *secureServer = [self HTTPSEnterpriseServerWithServer:server];
+                          return [[self
+                                   authorizeWithServerUsingWebView:webView server:secureServer scopes:scopes]
+                                  combineLatestWith:[RACSignal return:server]];
+                      }
+                      
+                      return [RACSignal error:error];
+                  }]
+                 reduceEach:^(NSString *temporaryCode, OCTServer *server) {
+                     NSDictionary *params = @{
+                                              @"client_id": clientID,
+                                              @"client_secret": clientSecret,
+                                              @"code": temporaryCode
+                                              };
+                     
+                     // We're using -requestWithMethod: for its parameter encoding and
+                     // User-Agent behavior, but we'll replace the key properties so we
+                     // can POST to another host.
+                     NSMutableURLRequest *request = [client requestWithMethod:@"POST" path:@"" parameters:params];
+                     request.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+                     request.URL = [NSURL URLWithString:@"login/oauth/access_token" relativeToURL:server.baseWebURL];
+                     
+                     // The `Accept` string we normally use (where we specify the beta
+                     // version of the API) doesn't work for this endpoint. Just plain
+                     // JSON.
+                     [request setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+                     
+                     
+                     RACSignal *tokenSignal = [[client
+                                                enqueueRequest:request resultClass:OCTAccessToken.class]
+                                               oct_parsedResults];
+                     
+                     return [RACSignal combineLatest:@[
+                                                       [RACSignal return:client],
+                                                       tokenSignal
+                                                       ]];
+                 }]
+                flatten]
+               reduceEach:^(OCTClient *client, OCTAccessToken *accessToken) {
+                   client.token = [accessToken.token copy];
+                   return client;
+               }]
+              flattenMap:^(OCTClient *client) {
+                  return [[[client
+                            fetchUserInfo]
+                           doNext:^(OCTUser *user) {
+                               NSMutableDictionary *userDict = [user.dictionaryValue mutableCopy] ?: [NSMutableDictionary dictionary];
+                               if (user.rawLogin == nil) userDict[@keypath(user.rawLogin)] = user.login;
+                               OCTUser *userWithRawLogin = [OCTUser modelWithDictionary:userDict error:NULL];
+                               client.user = userWithRawLogin;
+                           }]
+                          mapReplace:client];
+              }]
+             replayLazily]
+            setNameWithFormat:@"+signInToServerUsingWebView: %@ scopes:", server];
+}
+
++ (RACSignal *)authorizeWithServerUsingWebView:(UIWebView *)webView server:(OCTServer *)server scopes:(OCTClientAuthorizationScopes)scopes {
+	NSParameterAssert(server != nil);
+    
+	NSString *clientID = self.class.clientID;
+	NSAssert(clientID != nil, @"+setClientID:clientSecret: must be invoked before calling %@", NSStringFromSelector(_cmd));
+    
+	return [[RACSignal createSignal:^(id<RACSubscriber> subscriber) {
+		CFUUIDRef uuid = CFUUIDCreate(NULL);
+		NSString *uuidString = CFBridgingRelease(CFUUIDCreateString(NULL, uuid));
+		CFRelease(uuid);
+        
+		// For any matching callback URL, send the temporary code to our
+		// subscriber.
+		//
+		// This should be set up before opening the URL below, or we may
+		// miss values on self.callbackURLs.
+		RACDisposable *callbackDisposable = [[[self.callbackURLs
+                                               flattenMap:^(NSURL *URL) {
+                                                   NSDictionary *queryArguments = URL.oct_queryArguments;
+                                                   if ([queryArguments[@"state"] isEqual:uuidString]) {
+                                                       return [RACSignal return:queryArguments[@"code"]];
+                                                   } else {
+                                                       return [RACSignal empty];
+                                                   }
+                                               }]
+                                              take:1]
+                                             subscribe:subscriber];
+        
+		NSString *scope = [[self scopesArrayFromScopes:scopes] componentsJoinedByString:@","];
+        
+		// Trim trailing slashes from URL entered by the user, so we don't open
+		// their web browser to a URL that contains empty path components.
+		NSCharacterSet *slashSet = [NSCharacterSet characterSetWithCharactersInString:@"/"];
+		NSString *baseURLString = [server.baseWebURL.absoluteString stringByTrimmingCharactersInSet:slashSet];
+        
+		NSString *URLString = [[NSString alloc] initWithFormat:@"%@/login/oauth/authorize?client_id=%@&scope=%@&state=%@", baseURLString, clientID, scope, uuidString];
+		NSURL *webURL = [NSURL URLWithString:URLString];
+        
+        [webView loadRequest:[NSURLRequest requestWithURL:webURL]];
+        
+		return callbackDisposable;
+	}] setNameWithFormat:@"+authorizeWithServerUsingWebView: %@ scopes:", server];
+}
+
 + (RACSignal *)fetchMetadataForServer:(OCTServer *)server {
 	NSParameterAssert(server != nil);
 
